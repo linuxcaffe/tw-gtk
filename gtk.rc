@@ -14,6 +14,9 @@ gtk.list-height = 600
 # Form window (gtk_form_add, gtk_form_modify)
 gtk.form-width  = 520
 
+# Context switcher window (gtk-context.sh)
+gtk.context-width = 500
+
 # ── Task list display ─────────────────────────────────────────────────────────
 
 # Window title

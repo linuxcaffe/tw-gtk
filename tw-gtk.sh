@@ -73,6 +73,14 @@ _gtk_projects() {
         | grep -v '^$' | sort -u | tr '\n' '!' | sed 's/!$//'
 }
 
+_gtk_contexts() {
+    # Returns one context name per line (sorted); empty if none defined
+    task rc.hooks=off show 2>/dev/null \
+        | grep -E '^context\.[^.]+\.read' \
+        | sed 's/^context\.\([^.]*\)\.read.*/\1/' \
+        | sort -u
+}
+
 _gtk_escape_markup() {
     # Escape a string for safe use in Pango markup
     local s="$1"
@@ -101,7 +109,7 @@ _gtk_rows() {
         --argjson uthr "$urgent_threshold" \
         '
         (now | strftime("%Y%m%d") | tonumber) as $today |
-        .[] |
+        .[] | select(.id > 0) |
         # Due date as integer YYYYMMDD for reliable comparison (no tz issues)
         (.due | if . then (.[0:8] | tonumber) else 0 end) as $due_num |
         (.start != null)                           as $is_active  |
@@ -235,15 +243,6 @@ gtk_form_add() {
     local projects
     projects=$(_gtk_projects)
 
-    # Priority combo — put current value first so it shows as selected
-    local pri_combo
-    case "$pri" in
-        H) pri_combo="H!M!L!" ;;
-        M) pri_combo="M!H!L!" ;;
-        L) pri_combo="L!H!M!" ;;
-        *) pri_combo="!H!M!L" ;;
-    esac
-
     local result
     result=$(yad --form \
         --title="Add Task" \
@@ -252,12 +251,12 @@ gtk_form_add() {
         --field="Project:CBE" \
         --field="Due  (e.g. tomorrow, fri, 2w)" \
         --field="Scheduled" \
-        --field="Priority:CB" \
+        --field="Priority" \
         --field="Tags  (space-separated)" \
         "$desc" \
         "${proj}${projects:+!$projects}" \
         "$due" "$sched" \
-        "$pri_combo" \
+        "$pri" \
         "$tags" \
         --button="Add Task:0" --button="Cancel:1" 2>/dev/null) || return 1
 
@@ -309,14 +308,6 @@ gtk_form_modify() {
     local projects
     projects=$(_gtk_projects)
 
-    local pri_combo
-    case "$pri" in
-        H) pri_combo="H!M!L!" ;;
-        M) pri_combo="M!H!L!" ;;
-        L) pri_combo="L!H!M!" ;;
-        *) pri_combo="!H!M!L" ;;
-    esac
-
     local result
     result=$(yad --form \
         --title="Modify Task" \
@@ -325,12 +316,12 @@ gtk_form_modify() {
         --field="Project:CBE" \
         --field="Due" \
         --field="Scheduled" \
-        --field="Priority:CB" \
+        --field="Priority" \
         --field="Tags  (space-separated)" \
         "$desc" \
         "${proj}${projects:+!$projects}" \
         "$due" "$sched" \
-        "$pri_combo" \
+        "$pri" \
         "$tags" \
         --button="Save:0" --button="Cancel:1" 2>/dev/null) || return 1
 
@@ -380,6 +371,25 @@ gtk_action() {
     desc=$(_gtk_get "$uuid" description)
     safe=$(_gtk_escape_markup "$desc")
 
+    # Build context line: project · due · priority · tags
+    local proj due pri urg tags info_parts=()
+    proj=$(_gtk_get "$uuid" project)
+    due=$(_gtk_get  "$uuid" due)
+    pri=$(_gtk_get  "$uuid" priority)
+    urg=$(_gtk_get  "$uuid" urgency)
+    tags=$(task rc.hooks=off rc.verbose=nothing "$uuid" export 2>/dev/null \
+        | jq -r '.[0].tags // [] | [.[] | select(test("^[a-z]"))] | join(" ")')
+    [[ -n "$proj" ]] && info_parts+=("proj:<b>${proj}</b>")
+    [[ -n "$due"  ]] && info_parts+=("due:<b>${due:0:10}</b>")
+    [[ -n "$pri"  ]] && info_parts+=("pri:<b>${pri}</b>")
+    [[ -n "$urg"  ]] && info_parts+=("urg:$(printf '%.1f' "$urg")")
+    [[ -n "$tags" ]] && info_parts+=("tags:<i>${tags}</i>")
+    local meta_line
+    printf -v meta_line '%s' "$(IFS='  ·  '; echo "${info_parts[*]}")"
+
+    local text_body="<b>${safe}</b>"
+    [[ ${#info_parts[@]} -gt 0 ]] && text_body+="\n<small>${meta_line}</small>"
+
     # Build radiolist rows: FALSE "label" per action
     local -a rows=()
     for action in "${actions[@]}"; do
@@ -389,10 +399,10 @@ gtk_action() {
     local raw
     raw=$(yad --list --radiolist \
         --title="Task ${tid:-?}" \
-        --text="<b>${safe}</b>" \
+        --text="${text_body}" \
         --enable-markup \
         --no-headers \
-        --width=380 --height="$(( 80 + ${#actions[@]} * 36 ))" \
+        --width=420 --height="$(( 110 + ${#actions[@]} * 36 ))" \
         --column=":CHK" --column="Action" \
         --print-column=2 \
         "${rows[@]}" \
