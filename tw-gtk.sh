@@ -500,7 +500,6 @@ gtk_info() {
         --text="$text" \
         --enable-markup \
         --width="$width" \
-        --no-wrap \
         --button="Close:0" 2>/dev/null
 }
 
