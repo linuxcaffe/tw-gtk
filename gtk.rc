@@ -1,0 +1,23 @@
+# gtk.rc — configuration for tw-gtk extensions
+#
+# Include in ~/.taskrc with:
+#   include ~/.task/config/gtk.rc
+#
+# Or just place at ~/.task/config/gtk.rc — tw-gtk.sh reads it directly.
+
+# ── Window dimensions ─────────────────────────────────────────────────────────
+
+# Task list window (gtk_pick, gtk_pick_multi)
+gtk.list-width  = 900
+gtk.list-height = 600
+
+# Form window (gtk_form_add, gtk_form_modify)
+gtk.form-width  = 520
+
+# ── Task list display ─────────────────────────────────────────────────────────
+
+# Window title
+gtk.title = Taskwarrior
+
+# Urgency threshold for amber highlight (no due date, just high urgency)
+gtk.urgent-hi = 15
