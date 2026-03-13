@@ -28,7 +28,13 @@ while true; do
         action_set="start done modify annotate info delete"
     fi
 
-    action=$(gtk_action "$uuid" $action_set) || continue
+    # Inner loop: info re-shows action dialog; any other action breaks out
+    while true; do
+        action=$(gtk_action "$uuid" $action_set) || { action=''; break; }
+        [[ "$action" == "info" ]] || break
+        gtk_info "$uuid"
+    done
+    [[ -n "$action" ]] || continue
 
     tid=$(_gtk_get "$uuid" id)
 
@@ -55,9 +61,6 @@ while true; do
         annotate)
             _gtk_annotate "$uuid" && \
                 gtk_notify "Annotated task ${tid}" ;;
-
-        info)
-            gtk_info "$uuid" ;;
 
         delete)
             if gtk_confirm "Delete this task?" "$uuid"; then
