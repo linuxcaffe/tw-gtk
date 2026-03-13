@@ -411,6 +411,99 @@ gtk_action() {
     printf '%s' "${raw%%|*}"
 }
 
+gtk_info() {
+    # Show a full task info dialog (read-only).
+    #
+    # Usage: gtk_info <uuid>
+
+    local uuid="$1"
+    local json
+    json=$(task rc.hooks=off rc.color=off "$uuid" export 2>/dev/null) || return 1
+
+    local tid
+    tid=$(echo "$json" | jq -r '.[0].id')
+
+    local text
+    text=$(echo "$json" | jq -r '
+        .[0] |
+
+        def fdate: if . then "\(.[0:4])-\(.[4:6])-\(.[6:8])" else null end;
+        def fdatetime: if . then "\(.[0:4])-\(.[4:6])-\(.[6:8]) \(.[9:11]):\(.[11:13])" else null end;
+        def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+
+        [
+          # ── Description (large, bold) ────────────────────────────────────
+          "<span size=\"large\" weight=\"bold\">" + (.description | esc) + "</span>",
+          "",
+
+          # ── Core identifiers ─────────────────────────────────────────────
+          ("<b>ID:</b>  " + (.id | tostring)
+           + "   <b>Status:</b>  " + .status
+           + "   <b>Urgency:</b>  " + ((.urgency // 0) * 10 | round / 10 | tostring)),
+
+          # ── Project / Priority ───────────────────────────────────────────
+          (if .project  then "<b>Project:</b>   " + (.project | esc) else empty end),
+          (if .priority then "<b>Priority:</b>  " + (.priority | tostring) else empty end),
+          "",
+
+          # ── Dates ────────────────────────────────────────────────────────
+          (if .due       then "<b>Due:</b>        " + (.due       | fdate) else empty end),
+          (if .scheduled then "<b>Scheduled:</b>  " + (.scheduled | fdate) else empty end),
+          (if .wait      then "<b>Wait:</b>       " + (.wait      | fdate) else empty end),
+          (if .until     then "<b>Until:</b>      " + (.until     | fdate) else empty end),
+          (if .start     then "<b>Active since:</b>  " + (.start  | fdatetime) else empty end),
+
+          # ── Tags ─────────────────────────────────────────────────────────
+          (if ([ (.tags // [])[] | select(test("^[a-z]")) ] | length) > 0 then
+            "<b>Tags:</b>  +"
+            + ([ (.tags // [])[] | select(test("^[a-z]")) ] | join("  +"))
+          else empty end),
+          "",
+
+          # ── Housekeeping ─────────────────────────────────────────────────
+          "<b>Created:</b>   " + (.entry    | fdatetime),
+          "<b>Modified:</b>  " + (.modified | fdatetime),
+
+          # ── Recurrence ───────────────────────────────────────────────────
+          (if .recur then
+            "<b>Recurs:</b>  " + .recur
+            + (if .rtype then "  <small>(" + .rtype + ")</small>" else "" end)
+          else empty end),
+
+          # ── Dependencies ─────────────────────────────────────────────────
+          (if (.depends // [] | length) > 0 then
+            "",
+            "<b>Depends on:</b>  "
+            + ([ .depends[] | .[0:8] ] | join(",  "))
+          else empty end),
+
+          # ── Annotations ──────────────────────────────────────────────────
+          (if (.annotations // [] | length) > 0 then
+            "",
+            "<b>Annotations:</b>",
+            (.annotations[]
+              | "  <small>" + (.entry | fdatetime) + "</small>  " + (.description | esc))
+          else empty end),
+
+          # ── UUID (footer) ────────────────────────────────────────────────
+          "",
+          "<small><span foreground=\"#888888\">" + .uuid + "</span></small>"
+
+        ] | join("\n")
+    ')
+
+    local width
+    width=$(_gtk_cfg gtk.info-width 520)
+
+    yad --info \
+        --title="Task ${tid}" \
+        --text="$text" \
+        --enable-markup \
+        --width="$width" \
+        --no-wrap \
+        --button="Close:0" 2>/dev/null
+}
+
 gtk_confirm() {
     # Yes/no confirmation dialog; return 0 (yes) or 1 (no/cancel).
     #

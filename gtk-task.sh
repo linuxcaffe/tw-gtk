@@ -23,9 +23,9 @@ while true; do
     # Decide whether to offer start or stop based on active state
     is_active=$(_gtk_get "$uuid" start)
     if [[ -n "$is_active" ]]; then
-        action_set="stop done modify annotate delete"
+        action_set="stop done modify annotate info delete"
     else
-        action_set="start done modify annotate delete"
+        action_set="start done modify annotate info delete"
     fi
 
     action=$(gtk_action "$uuid" $action_set) || continue
@@ -55,6 +55,9 @@ while true; do
         annotate)
             _gtk_annotate "$uuid" && \
                 gtk_notify "Annotated task ${tid}" ;;
+
+        info)
+            gtk_info "$uuid" ;;
 
         delete)
             if gtk_confirm "Delete this task?" "$uuid"; then

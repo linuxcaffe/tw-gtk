@@ -21,7 +21,7 @@ while true; do
 
     uuid=$(gtk_pick "${FILTER[@]}" --title "$TITLE") || break
 
-    action=$(gtk_action "$uuid" priority due project start done skip) || continue
+    action=$(gtk_action "$uuid" priority due project start done info skip) || continue
 
     tid=$(_gtk_get "$uuid" id)
 
@@ -71,6 +71,9 @@ while true; do
                 _gtk_task "$uuid" done
                 gtk_notify "✓ Completed task ${tid}"
             fi ;;
+
+        info)
+            gtk_info "$uuid" ;;
 
         skip)
             continue ;;

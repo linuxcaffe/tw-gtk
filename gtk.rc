@@ -17,6 +17,9 @@ gtk.form-width  = 520
 # Context switcher window (gtk-context.sh)
 gtk.context-width = 500
 
+# Task info dialog (gtk_info)
+gtk.info-width    = 520
+
 # ── Task list display ─────────────────────────────────────────────────────────
 
 # Window title
