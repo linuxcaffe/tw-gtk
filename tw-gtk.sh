@@ -594,3 +594,381 @@ _gtk_annotate() {
     [[ -n "$text" ]] || return 1
     _gtk_task "$uuid" annotate "$text"
 }
+
+# ── Report generation / cache ─────────────────────────────────────────────────
+
+_GTK_REPORT_CACHE="${HOME}/.task/config/.gtk_reports.json"
+
+# Fixed jq program for dynamic report rendering.
+# Caller passes:  --argjson cols '["id","markup","project",...]'
+# Outputs one field per line per task: uuid, then one value per col key.
+# Unknown keys fall back to getpath([k]) for UDA fields.
+_GTK_REPORT_JQ='
+(now | strftime("%Y%m%d") | tonumber) as $today |
+def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+def fdate: if . then "\(.[0:4])-\(.[4:6])-\(.[6:8])" else "" end;
+def fdatetime: if . then "\(.[0:4])-\(.[4:6])-\(.[6:8]) \(.[9:11]):\(.[11:13])" else "" end;
+def age_str(t):
+  (now - t) as $s |
+  if   $s < 0         then "future"
+  elif $s < 90        then "\($s|round)s"
+  elif $s < 5400      then "\($s/60|round)m"
+  elif $s < 172800    then "\($s/3600|round)h"
+  elif $s < 1209600   then "\($s/86400|round)d"
+  elif $s < 5184000   then "\($s/86400/7|round)w"
+  else "\($s/86400/30|round)mo" end;
+def tw_epoch: "\(.[0:4])-\(.[4:6])-\(.[6:8])T\(.[9:11]):\(.[11:13]):\(.[13:15])Z" | fromdate;
+def due_epoch: (.due | if . then ("\(.[0:4])-\(.[4:6])-\(.[6:8])T00:00:00Z" | fromdate) else null end);
+def col_val(k):
+  if   k == "id"                then (.id | tostring)
+  elif k == "markup"            then
+    ((.start != null) as $act |
+     (.due | if . then (.[0:8] | tonumber) else 0 end) as $dn |
+     ($dn > 0 and $dn < $today) as $od |
+     (.description | esc) as $s |
+     if $act then "<b>\($s)</b>"
+     elif $od then "<span foreground=\"#cc0000\">\($s)</span>"
+     else $s end)
+  elif k == "description"       then (.description | esc)
+  elif k == "project"           then (.project // "")
+  elif k == "due"               then (.due | fdate)
+  elif k == "due.relative"      then (due_epoch | if . then age_str(.) else "" end)
+  elif k == "scheduled"         then (.scheduled | fdate)
+  elif k == "scheduled.relative" then (.scheduled | if . then ("\(.[0:4])-\(.[4:6])-\(.[6:8])T00:00:00Z" | fromdate | age_str(.)) else "" end)
+  elif k == "wait"              then (.wait | fdate)
+  elif k == "until"             then (.until | fdate)
+  elif k == "entry"             then (.entry | fdate)
+  elif k == "entry.age"         then (.entry    | if . then (tw_epoch | age_str(.)) else "" end)
+  elif k == "modified"          then (.modified | fdate)
+  elif k == "modified.age"      then (.modified | if . then (tw_epoch | age_str(.)) else "" end)
+  elif k == "end"               then (.end | fdate)
+  elif k == "start"             then (.start | fdatetime)
+  elif k == "start.age"         then (.start    | if . then (tw_epoch | age_str(.)) else "" end)
+  elif k == "priority"          then (.priority // "")
+  elif k == "urgency"           then ((.urgency // 0) | floor | tostring)
+  elif k == "tags"              then ([(.tags // [])[] | select(test("^[a-z]"))] | join(" "))
+  elif k == "depends.count"     then ((.depends // []) | length | tostring)
+  elif k == "depends.indicator" then (if ((.depends // []) | length) > 0 then "D" else "" end)
+  elif k == "recur.indicator"   then (if .recur then "R" else "" end)
+  elif k == "recur"             then (.recur // "")
+  elif k == "start.active"      then (if .start then "A" else "" end)
+  elif k == "annotations.count" then ((.annotations // []) | length | tostring)
+  elif k == "status"            then (.status // "")
+  elif k == "uuid"              then .uuid
+  else (getpath([k]) | if . == null then "" elif type == "string" then . else tostring end)
+  end;
+.[] | select(.id > 0) |
+.uuid,
+($cols[] as $k | col_val($k))
+'
+
+_gtk_col_to_key() {
+    # Map a TW report column spec → "jq_key|YAD_TYPE|display_label"
+    # Returns empty for columns that should be silently skipped (raw numeric formats etc.)
+    #
+    # Also handles:
+    #   - Format suffixes: .age / .relative / .formatted / .indicator etc.
+    #   - UDA fields: fall through to dynamic jq getpath lookup
+    local col="$1"
+    local base="${col%%.*}"
+    local suffix="${col#*.}"
+    [[ "$suffix" == "$col" ]] && suffix=""  # no dot → no suffix
+
+    # Skip raw/unusable formats
+    case "$suffix" in
+        epoch|julian|iso|countdown|remaining) return 0 ;;
+    esac
+
+    # Known column mappings
+    case "$col" in
+        id)                                        echo "id|NUM|ID" ;;
+        description|description.desc|description.combined|description.truncated|description.truncated_count|description.oneline|description.count)
+                                                   echo "markup|TEXT|Description" ;;
+        project)                                   echo "project|TEXT|Project" ;;
+        due|due.formatted)                         echo "due|TEXT|Due" ;;
+        due.relative|due.age)                      echo "due.relative|TEXT|Due" ;;
+        due.indicator)                             echo "due|TEXT|Due" ;;
+        scheduled|scheduled.formatted)             echo "scheduled|TEXT|Scheduled" ;;
+        scheduled.relative|scheduled.age)          echo "scheduled.relative|TEXT|Scheduled" ;;
+        wait|wait.formatted)                       echo "wait|TEXT|Wait" ;;
+        until|until.formatted)                     echo "until|TEXT|Until" ;;
+        entry|entry.formatted)                     echo "entry|TEXT|Entry" ;;
+        entry.age|entry.relative)                  echo "entry.age|TEXT|Age" ;;
+        modified|modified.formatted)               echo "modified|TEXT|Modified" ;;
+        modified.age|modified.relative)            echo "modified.age|TEXT|Modified" ;;
+        end|end.formatted)                         echo "end|TEXT|End" ;;
+        start|start.formatted)                     echo "start|TEXT|Started" ;;
+        start.age|start.relative)                  echo "start.age|TEXT|Active" ;;
+        start.active)                              echo "start.active|TEXT|A" ;;
+        priority)                                  echo "priority|TEXT|P" ;;
+        urgency)                                   echo "urgency|NUM|Urg" ;;
+        tags|tags.list)                            echo "tags|TEXT|Tags" ;;
+        depends|depends.list)                      echo "depends.count|NUM|Deps" ;;
+        depends.count)                             echo "depends.count|NUM|Deps" ;;
+        depends.indicator)                         echo "depends.indicator|TEXT|D" ;;
+        recur|recur.formatted)                     echo "recur|TEXT|Recur" ;;
+        recur.indicator)                           echo "recur.indicator|TEXT|R" ;;
+        annotations|annotations.count)             echo "annotations.count|NUM|Ann" ;;
+        status)                                    echo "status|TEXT|Status" ;;
+        uuid)                                      echo "uuid|TEXT|UUID" ;;
+        # UDA fields and unrecognised base fields: dynamic lookup
+        *)
+            # Skip virtual/internal TW fields
+            case "$base" in
+                imask|mask|parent|template|rtemplate|rtype|ranchor|rindex|rlast|rend|rscheduled|rwait|last|r)
+                    return 0 ;;
+            esac
+            # UDA or other real field: dynamic jq lookup, display as string
+            local label="${base^}"
+            echo "${base}|TEXT|${label}" ;;
+    esac
+}
+
+_gtk_gen_report() {
+    # Generate (or regenerate) one or more reports; writes to cache.
+    # Usage: _gtk_gen_report name [name ...]
+    local -a names=("$@")
+    [[ ${#names[@]} -eq 0 ]] && { echo "[gtk] No report names given"; return 1; }
+
+    # Load existing cache or start fresh
+    local cache="{}"
+    [[ -f "$_GTK_REPORT_CACHE" ]] && cache=$(< "$_GTK_REPORT_CACHE")
+
+    local generated_any=0
+    for name in "${names[@]}"; do
+        echo "[gtk] Generating: $name"
+
+        local cols_raw filter_raw sort_raw labels_raw
+        cols_raw=$(task rc.hooks=off _get "rc.report.${name}.columns" 2>/dev/null)
+
+        if [[ -z "$cols_raw" ]]; then
+            echo "[gtk] Warning: no columns for report '$name' — skipping"
+            continue
+        fi
+
+        filter_raw=$(task rc.hooks=off _get "rc.report.${name}.filter" 2>/dev/null)
+        sort_raw=$(task   rc.hooks=off _get "rc.report.${name}.sort"   2>/dev/null)
+        labels_raw=$(task rc.hooks=off _get "rc.report.${name}.labels" 2>/dev/null)
+
+        # Build parallel arrays: yad column specs + jq key names
+        local -a yad_cols=("--column=:HD")   # UUID always first (hidden)
+        local -a cols_keys=()
+        local -a label_arr=()
+        local warned=""
+
+        # Parse optional user labels (comma-separated, parallel to columns)
+        IFS=',' read -ra label_arr <<< "$labels_raw"
+
+        local idx=0
+        IFS=',' read -ra col_specs <<< "$cols_raw"
+        for spec in "${col_specs[@]}"; do
+            spec="${spec// /}"
+            local mapped
+            mapped=$(_gtk_col_to_key "$spec")
+            if [[ -z "$mapped" ]]; then
+                warned="${warned:+$warned, }$spec"
+                (( idx++ )) || true
+                continue
+            fi
+            local key ytype label
+            key="${mapped%%|*}"
+            ytype=$(echo "$mapped" | cut -d'|' -f2)
+            label=$(echo "$mapped" | cut -d'|' -f3)
+            # User label takes precedence if present
+            [[ -n "${label_arr[$idx]:-}" ]] && label="${label_arr[$idx]}"
+            yad_cols+=("--column=${label}:${ytype}")
+            cols_keys+=("$key")
+            (( idx++ )) || true
+        done
+
+        [[ -n "$warned" ]] && echo "[gtk] Skipping columns: $warned"
+
+        if [[ ${#cols_keys[@]} -eq 0 ]]; then
+            echo "[gtk] Warning: no mappable columns for '$name' — skipping"
+            continue
+        fi
+
+        local ts
+        ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        local yad_json cols_json
+        yad_json=$(printf '%s\n' "${yad_cols[@]}"  | jq -R . | jq -s .)
+        cols_json=$(printf '%s\n' "${cols_keys[@]}" | jq -R . | jq -s .)
+
+        local entry
+        entry=$(jq -n \
+            --arg  filter  "$filter_raw" \
+            --arg  sort    "$sort_raw" \
+            --arg  ts      "$ts" \
+            --argjson yad_cols "$yad_json" \
+            --argjson cols     "$cols_json" \
+            '{filter:$filter, sort:$sort, yad_cols:$yad_cols, cols:$cols, generated:$ts}')
+
+        cache=$(echo "$cache" | jq --arg n "$name" --argjson e "$entry" '. + {($n): $e}')
+        echo "[gtk] Cached: $name (${#cols_keys[@]} columns)"
+        generated_any=1
+    done
+
+    if [[ $generated_any -eq 1 ]]; then
+        mkdir -p "$(dirname "$_GTK_REPORT_CACHE")"
+        echo "$cache" > "$_GTK_REPORT_CACHE"
+        echo "[gtk] Saved $_GTK_REPORT_CACHE"
+    fi
+}
+
+_gtk_build_header() {
+    # Build Pango-markup header line for list displays.
+    # Usage: _gtk_build_header "display_label" filter_args...
+    local label="$1"; shift
+    local -a fargs=("$@")
+
+    local ctx total shown
+    ctx=$(task rc.hooks=off _get rc.context 2>/dev/null)
+    total=$(task rc.hooks=off rc.verbose=nothing count 2>/dev/null || true)
+    shown=$(task rc.hooks=off rc.verbose=nothing "${fargs[@]}" count 2>/dev/null || true)
+
+    local hdr=""
+    [[ -n "$ctx" ]] && hdr+="context: <b>$(_gtk_escape_markup "$ctx")</b>   ·   "
+    hdr+="filter: <b>$(_gtk_escape_markup "$label")</b>"
+    hdr+="   ·   <b>${shown:-?}</b>/<b>${total:-?}</b> tasks"
+    printf '%s' "$hdr"
+}
+
+# Action exit codes returned by _gtk_run_report
+_GTK_ACT_DONE=10
+_GTK_ACT_DELETE=11
+_GTK_ACT_START=12
+_GTK_ACT_STOP=13
+_GTK_ACT_INFO=14
+_GTK_ACT_MODIFY=15
+_GTK_ACT_ANNOTATE=16
+_GTK_ACT_UNDO=17
+_GTK_ACT_QUIT=1
+
+_gtk_run_report() {
+    # Show a cached report with action buttons in the footer.
+    # Strips columns that are entirely empty for the current result set.
+    #
+    # Usage: _gtk_run_report <name> [extra-filter-args...]
+    #
+    # Prints selected UUID on stdout (may be empty for global actions like undo).
+    # Returns exit code = action (see _GTK_ACT_* constants above).
+    #   0/252 = window closed / double-click → treat as quit in caller
+    #   1     = _Quit button
+
+    local name="$1"; shift
+    local -a extra_filter=("$@")
+
+    [[ -f "$_GTK_REPORT_CACHE" ]] || {
+        gtk_notify "No reports cached — run: tw -g --gen $name"
+        return 1
+    }
+
+    local entry
+    entry=$(jq -r --arg n "$name" '.[$n] // empty' "$_GTK_REPORT_CACHE")
+    [[ -n "$entry" ]] || {
+        gtk_notify "Report '$name' not cached — run: tw -g --gen $name"
+        return 1
+    }
+
+    local filter cols_json
+    filter=$(echo   "$entry" | jq -r '.filter // ""')
+    cols_json=$(echo "$entry" | jq -c '.cols')
+    local -a cols_keys
+    mapfile -t cols_keys < <(echo "$entry" | jq -r '.cols[]')
+    local ncols=${#cols_keys[@]}
+    local -a yad_cols
+    mapfile -t yad_cols < <(echo "$entry" | jq -r '.yad_cols[]')
+
+    local -a filter_args=()
+    [[ -n "$filter" ]] && read -ra filter_args <<< "$filter"
+    filter_args+=("${extra_filter[@]}")
+    [[ ${#filter_args[@]} -eq 0 ]] && filter_args=(+PENDING)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    local filter_label="${extra_filter[*]:-}"
+    [[ -z "$filter_label" ]] && filter_label="$filter"
+    [[ -z "$filter_label" ]] && filter_label="${filter_args[*]}"
+    local header_text
+    header_text=$(_gtk_build_header "$filter_label" "${filter_args[@]}")
+
+    # ── Buffer rows ───────────────────────────────────────────────────────────
+    local -a all_rows
+    mapfile -t all_rows < <(
+        task rc.hooks=off rc.color=off "${filter_args[@]}" export 2>/dev/null \
+        | jq -r --argjson cols "$cols_json" "$_GTK_REPORT_JQ"
+    )
+
+    local ntasks=0
+    [[ ${#all_rows[@]} -gt 0 ]] && ntasks=$(( ${#all_rows[@]} / (ncols + 1) ))
+
+    # ── Detect empty columns ──────────────────────────────────────────────────
+    local -a keep=()
+    for ((c=0; c<ncols; c++)); do keep[$c]=0; done
+    for ((t=0; t<ntasks; t++)); do
+        for ((c=0; c<ncols; c++)); do
+            local li=$(( t * (ncols+1) + 1 + c ))
+            [[ -n "${all_rows[$li]:-}" ]] && keep[$c]=1
+        done
+    done
+
+    # ── Build filtered yad_cols; track description search column ─────────────
+    local -a active_yad_cols=("${yad_cols[0]}")   # UUID hidden col always col 1
+    local search_col=0
+    local ycol_idx=1   # YAD is 1-indexed; col 1 = UUID (hidden)
+    for ((c=0; c<ncols; c++)); do
+        if [[ ${keep[$c]} -eq 1 ]]; then
+            (( ycol_idx++ ))
+            active_yad_cols+=("${yad_cols[$((c+1))]}")
+            if [[ $search_col -eq 0 && \
+                  ( "${cols_keys[$c]}" == "markup" || "${cols_keys[$c]}" == "description" ) ]]; then
+                search_col=$ycol_idx
+            fi
+        fi
+    done
+    [[ $search_col -eq 0 ]] && search_col=2   # fallback: col 2 (first data col)
+
+    # ── Build filtered row data ───────────────────────────────────────────────
+    local -a yad_data=()
+    for ((t=0; t<ntasks; t++)); do
+        local base=$(( t * (ncols+1) ))
+        yad_data+=("${all_rows[$base]}")   # UUID
+        for ((c=0; c<ncols; c++)); do
+            [[ ${keep[$c]} -eq 1 ]] && yad_data+=("${all_rows[$((base+1+c))]}")
+        done
+    done
+
+    # ── Show list + action buttons ────────────────────────────────────────────
+    local title width height
+    title=$(_gtk_cfg gtk.title "Taskwarrior — $name")
+    width=$(_gtk_cfg  gtk.list-width  900)
+    height=$(_gtk_cfg gtk.list-height 600)
+
+    local raw
+    raw=$(printf '%s\n' "${yad_data[@]}" \
+        | yad --list \
+            --title="$title" \
+            --text="$header_text" \
+            --enable-markup \
+            --search-column="$search_col" \
+            --print-column=1 \
+            --width="$width" --height="$height" \
+            "${active_yad_cols[@]}" \
+            --button="_Done:${_GTK_ACT_DONE}" \
+            --button="d_elete:${_GTK_ACT_DELETE}" \
+            --button="_Start:${_GTK_ACT_START}" \
+            --button="S_top:${_GTK_ACT_STOP}" \
+            --button="_Info:${_GTK_ACT_INFO}" \
+            --button="_Modify:${_GTK_ACT_MODIFY}" \
+            --button="_Annotate:${_GTK_ACT_ANNOTATE}" \
+            --button="_Undo:${_GTK_ACT_UNDO}" \
+            --button="_Quit:${_GTK_ACT_QUIT}" \
+            2>/dev/null)
+    local ret=$?
+
+    # Window-close (252) → caller treats as quit
+    [[ $ret -eq 252 ]] && return 1
+
+    printf '%s' "${raw%%|*}"
+    return $ret
+}
