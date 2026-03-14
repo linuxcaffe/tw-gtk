@@ -57,7 +57,7 @@ if [[ $# -eq 0 ]]; then
         _gtk_report_mode=report
         _gtk_report_name=next
     fi
-elif [[ $# -eq 1 ]] && jq -e --arg n "$1" '.[$n]' "$_GTK_REPORT_CACHE" &>/dev/null 2>&1; then
+elif [[ $# -ge 1 ]] && jq -e --arg n "$1" '.[$n]' "$_GTK_REPORT_CACHE" &>/dev/null 2>&1; then
     _gtk_report_mode=report
     _gtk_report_name="$1"
     shift
@@ -126,61 +126,62 @@ fi
 
 # ── Filter mode (default: +READY) ─────────────────────────────────────────────
 declare -a FILTER=("${@:-+READY}")
-TITLE="Taskwarrior — ${FILTER[*]}"
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 while true; do
+    uuid=$(_gtk_filter_list "${FILTER[@]}")
+    act=$?
 
-    uuid=$(gtk_pick "${FILTER[@]}" --title "$TITLE") || break
+    # Quit / window-close / no action
+    [[ $act -eq $_GTK_ACT_QUIT || $act -eq 0 || $act -eq 252 ]] && break
 
-    # Decide whether to offer start or stop based on active state
-    is_active=$(_gtk_get "$uuid" start)
-    if [[ -n "$is_active" ]]; then
-        action_set="stop done modify annotate info delete"
-    else
-        action_set="start done modify annotate info delete"
+    # Undo: no task needed
+    if [[ $act -eq $_GTK_ACT_UNDO ]]; then
+        task rc.confirmation=off undo >/dev/null 2>&1 \
+            && gtk_notify "Undo complete" \
+            || gtk_notify "Nothing to undo"
+        continue
     fi
 
-    # Inner loop: info re-shows action dialog; any other action breaks out
-    while true; do
-        action=$(gtk_action "$uuid" $action_set) || { action=''; break; }
-        [[ "$action" == "info" ]] || break
-        gtk_info "$uuid"
-    done
-    [[ -n "$action" ]] || continue
+    # All other actions require a selected task
+    if [[ -z "$uuid" ]]; then
+        gtk_notify "Select a task first"
+        continue
+    fi
 
     tid=$(_gtk_get "$uuid" id)
 
-    case "$action" in
-
-        start)
-            _gtk_task "$uuid" start
-            gtk_notify "Started task ${tid}" ;;
-
-        stop)
-            _gtk_task "$uuid" stop
-            gtk_notify "Stopped task ${tid}" ;;
-
-        done)
+    case "$act" in
+        "$_GTK_ACT_DONE")
             if gtk_confirm "Mark as done?" "$uuid"; then
                 _gtk_task "$uuid" done
                 gtk_notify "✓ Completed task ${tid}"
             fi ;;
 
-        modify)
-            gtk_form_modify "$uuid" && \
-                gtk_notify "Modified task ${tid}" ;;
-
-        annotate)
-            _gtk_annotate "$uuid" && \
-                gtk_notify "Annotated task ${tid}" ;;
-
-        delete)
+        "$_GTK_ACT_DELETE")
             if gtk_confirm "Delete this task?" "$uuid"; then
                 _gtk_task "$uuid" delete
                 gtk_notify "Deleted task ${tid}"
             fi ;;
 
+        "$_GTK_ACT_START")
+            if [[ -n "$(_gtk_get "$uuid" start)" ]]; then
+                _gtk_task "$uuid" stop && gtk_notify "Stopped task ${tid}"
+            else
+                _gtk_task "$uuid" start && gtk_notify "Started task ${tid}"
+            fi ;;
+
+        "$_GTK_ACT_STOP")
+            _gtk_task "$uuid" stop && gtk_notify "Stopped task ${tid}" ;;
+
+        "$_GTK_ACT_INFO")
+            gtk_info "$uuid" ;;
+
+        "$_GTK_ACT_MODIFY")
+            gtk_form_modify "$uuid" && gtk_notify "Modified task ${tid}" ;;
+
+        "$_GTK_ACT_ANNOTATE")
+            _gtk_annotate "$uuid" && gtk_notify "Annotated task ${tid}" ;;
     esac
 
 done

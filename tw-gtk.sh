@@ -916,7 +916,7 @@ _gtk_build_header() {
     printf '%s' "$hdr"
 }
 
-# Action exit codes returned by _gtk_run_report
+# Action exit codes returned by _gtk_run_report / _gtk_show_list_buttons
 _GTK_ACT_DONE=10
 _GTK_ACT_DELETE=11
 _GTK_ACT_START=12
@@ -926,6 +926,120 @@ _GTK_ACT_MODIFY=15
 _GTK_ACT_ANNOTATE=16
 _GTK_ACT_UNDO=17
 _GTK_ACT_QUIT=1
+
+_gtk_show_list_buttons() {
+    # Show a YAD list with action footer buttons; return UUID on stdout + action as exit code.
+    # Usage: _gtk_show_list_buttons row_data... -- title header_text search_col width height yad_col_specs...
+    # The '--' sentinel separates row data from display options.
+    # Prints selected UUID on stdout (empty if no row selected or global action like Undo).
+    # Returns exit code = action (_GTK_ACT_* constant).
+
+    local -a row_data=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        row_data+=("$1"); shift
+    done
+    [[ "$1" == "--" ]] && shift
+    local title="${1:-Taskwarrior}"; shift
+    local header_text="${1:-}";      shift
+    local search_col="${1:-2}";      shift
+    local width="${1:-900}";         shift
+    local height="${1:-600}";        shift
+    local -a yad_cols=("$@")
+
+    # Use a temp helper script for --select-action to avoid quoting issues
+    # (YAD splits the select-action string on whitespace before exec, so
+    # 'bash -c "..." yad' approach fails. A script file has no quoting problems.)
+    local _uuid_file _sel_script
+    _uuid_file=$(mktemp /tmp/gtk_uuid_XXXXXX)
+    _sel_script=$(mktemp /tmp/gtk_sel_XXXXXX)
+    printf '#!/bin/sh\nprintf "%%s" "$1" > "%s"\n' "$_uuid_file" > "$_sel_script"
+    chmod +x "$_sel_script"
+
+    local raw
+    raw=$(printf '%s\n' "${row_data[@]}" \
+        | yad --list \
+            --title="$title" \
+            --text="$header_text" \
+            --enable-markup \
+            --search-column="$search_col" \
+            --print-column=1 \
+            --width="$width" --height="$height" \
+            "${yad_cols[@]}" \
+            --select-action="$_sel_script" \
+            --button="_Done:${_GTK_ACT_DONE}" \
+            --button="d_elete:${_GTK_ACT_DELETE}" \
+            --button="_Start:${_GTK_ACT_START}" \
+            --button="S_top:${_GTK_ACT_STOP}" \
+            --button="_Info:${_GTK_ACT_INFO}" \
+            --button="_Modify:${_GTK_ACT_MODIFY}" \
+            --button="_Annotate:${_GTK_ACT_ANNOTATE}" \
+            --button="_Undo:${_GTK_ACT_UNDO}" \
+            --button="_Quit:${_GTK_ACT_QUIT}" \
+            2>/dev/null)
+    local ret=$?
+    rm -f "$_sel_script"
+
+    # Window-close (252) → caller treats as quit
+    if [[ $ret -eq 252 ]]; then
+        rm -f "$_uuid_file"
+        return 1
+    fi
+
+    # Prefer --print-column result; fall back to --select-action temp file
+    local uuid="${raw%%|*}"
+    [[ -z "$uuid" && -s "$_uuid_file" ]] && uuid=$(< "$_uuid_file")
+    rm -f "$_uuid_file"
+
+    printf '%s' "$uuid"
+    return $ret
+}
+
+_gtk_filter_list() {
+    # Show a std-column task list with footer action buttons (filter mode).
+    # Usage: _gtk_filter_list [filter-args...]
+    # Prints selected UUID on stdout; returns exit code = action (_GTK_ACT_*).
+
+    local -a filter_args=("$@")
+    [[ ${#filter_args[@]} -eq 0 ]] && filter_args=(+READY)
+
+    # Header: context + filter + counts
+    local ctx_name ctx_read_raw=""
+    ctx_name=$(task _get rc.context 2>/dev/null)
+    [[ -n "$ctx_name" ]] && \
+        ctx_read_raw=$(task rc.hooks=off _get "rc.context.${ctx_name}.read" 2>/dev/null)
+    local -a ctx_fargs=()
+    [[ -n "$ctx_read_raw" ]] && read -ra ctx_fargs <<< "$ctx_read_raw"
+    local total ctx_count shown
+    total=$(task rc.hooks=off rc.context= rc.verbose=nothing +PENDING count 2>/dev/null || true)
+    if [[ -n "$ctx_name" ]]; then
+        ctx_count=$(task rc.hooks=off rc.context= rc.verbose=nothing \
+                        "${ctx_fargs[@]}" +PENDING count 2>/dev/null || true)
+    fi
+    shown=$(task rc.hooks=off rc.context= rc.verbose=nothing \
+                "${ctx_fargs[@]}" "${filter_args[@]}" +PENDING count 2>/dev/null || true)
+    local -a hdr_parts=()
+    if [[ -n "$ctx_name" ]]; then
+        hdr_parts+=("<b>$(_gtk_escape_markup "$ctx_name")</b> (${ctx_count:-?}/${total:-?})")
+        hdr_parts+=("<b>$(_gtk_escape_markup "${filter_args[*]}")</b> (${shown:-?}/${ctx_count:-?})")
+    else
+        hdr_parts+=("<b>$(_gtk_escape_markup "${filter_args[*]}")</b> (${shown:-?}/${total:-?})")
+    fi
+    local header_text
+    header_text=$(_gtk_build_header "${hdr_parts[@]}")
+
+    # Collect row data
+    local -a all_rows
+    mapfile -t all_rows < <(_gtk_rows "${ctx_fargs[@]}" "${filter_args[@]}")
+
+    local title width height
+    title=$(_gtk_cfg gtk.title "Taskwarrior")
+    width=$(_gtk_cfg  gtk.list-width  900)
+    height=$(_gtk_cfg gtk.list-height 600)
+
+    _gtk_show_list_buttons "${all_rows[@]}" \
+        -- "$title" "$header_text" 3 "$width" "$height" \
+        "${_gtk_std_cols[@]}"
+}
 
 _gtk_run_report() {
     # Show a cached report with action buttons in the footer.
@@ -1061,45 +1175,7 @@ _gtk_run_report() {
     width=$(_gtk_cfg  gtk.list-width  900)
     height=$(_gtk_cfg gtk.list-height 600)
 
-    # Use --select-action to reliably track selected UUID regardless of YAD
-    # version differences in --print-column behaviour for non-OK button presses.
-    local _uuid_file
-    _uuid_file=$(mktemp /tmp/gtk_uuid_XXXXXX)
-
-    local raw
-    raw=$(printf '%s\n' "${yad_data[@]}" \
-        | yad --list \
-            --title="$title" \
-            --text="$header_text" \
-            --enable-markup \
-            --search-column="$search_col" \
-            --print-column=1 \
-            --width="$width" --height="$height" \
-            "${active_yad_cols[@]}" \
-            --select-action="bash -c 'printf \"%s\" \"\$1\" > \"${_uuid_file}\"' yad" \
-            --button="_Done:${_GTK_ACT_DONE}" \
-            --button="d_elete:${_GTK_ACT_DELETE}" \
-            --button="_Start:${_GTK_ACT_START}" \
-            --button="S_top:${_GTK_ACT_STOP}" \
-            --button="_Info:${_GTK_ACT_INFO}" \
-            --button="_Modify:${_GTK_ACT_MODIFY}" \
-            --button="_Annotate:${_GTK_ACT_ANNOTATE}" \
-            --button="_Undo:${_GTK_ACT_UNDO}" \
-            --button="_Quit:${_GTK_ACT_QUIT}" \
-            2>/dev/null)
-    local ret=$?
-
-    # Window-close (252) → caller treats as quit
-    if [[ $ret -eq 252 ]]; then
-        rm -f "$_uuid_file"
-        return 1
-    fi
-
-    # Prefer --print-column result; fall back to --select-action temp file
-    local uuid="${raw%%|*}"
-    [[ -z "$uuid" && -s "$_uuid_file" ]] && uuid=$(< "$_uuid_file")
-    rm -f "$_uuid_file"
-
-    printf '%s' "$uuid"
-    return $ret
+    _gtk_show_list_buttons "${yad_data[@]}" \
+        -- "$title" "$header_text" "$search_col" "$width" "$height" \
+        "${active_yad_cols[@]}"
 }
