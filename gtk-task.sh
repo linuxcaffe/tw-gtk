@@ -81,7 +81,10 @@ if [[ "$_gtk_report_mode" == "report" ]]; then
         fi
 
         # All other actions need a selected task
-        [[ -z "$uuid" ]] && continue
+        if [[ -z "$uuid" ]]; then
+            gtk_notify "Select a task first"
+            continue
+        fi
 
         tid=$(_gtk_get "$uuid" id)
 

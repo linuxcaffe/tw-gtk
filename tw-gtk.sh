@@ -724,6 +724,67 @@ _gtk_col_to_key() {
     esac
 }
 
+_gtk_sort_spec_to_jq() {
+    # Convert a TW sort spec (e.g. "start-,priority-,edate+,urgency-") to a jq
+    # sort_by() expression that can be applied to the raw export array.
+    # Unknown fields are silently ignored.
+    local sort_spec="$1"
+    [[ -z "$sort_spec" ]] && { echo ""; return; }
+
+    local -a keys=()
+    IFS=',' read -ra specs <<< "$sort_spec"
+    for spec in "${specs[@]}"; do
+        spec="${spec// /}"
+        [[ -z "$spec" ]] && continue
+        local dir="${spec: -1}"
+        local field="${spec%[-+]}"
+        [[ "$dir" != "-" && "$dir" != "+" ]] && dir="+"
+
+        local expr=""
+        case "$field" in
+            urgency)
+                [[ "$dir" == "-" ]] \
+                    && expr='((.urgency // 0) * -1)' \
+                    || expr='(.urgency // 0)' ;;
+            id)
+                [[ "$dir" == "-" ]] \
+                    && expr='(.id * -1)' \
+                    || expr='(.id)' ;;
+            priority)
+                # H=0 M=1 L=2 ""=3 for descending (highest priority first)
+                if [[ "$dir" == "-" ]]; then
+                    expr='(if .priority == "H" then 0 elif .priority == "M" then 1 elif .priority == "L" then 2 else 3 end)'
+                else
+                    expr='(if .priority == "L" then 0 elif .priority == "M" then 1 elif .priority == "H" then 2 else 3 end)'
+                fi ;;
+            start)
+                # start-: active (has start) first → 0; inactive → 1
+                [[ "$dir" == "-" ]] \
+                    && expr='(if .start then 0 else 1 end)' \
+                    || expr='(if .start then 1 else 0 end)' ;;
+            edate)
+                # Effective date: due // scheduled // entry (string sort ascending)
+                expr='(.due // .scheduled // .entry // "z")' ;;
+            due)       expr='(.due // "z")' ;;
+            scheduled) expr='(.scheduled // "z")' ;;
+            entry)     expr='(.entry // "")' ;;
+            modified)  expr='(.modified // "")' ;;
+            project)   expr='(.project // "")' ;;
+            description) expr='(.description // "")' ;;
+            wait|until|end) expr="(.${field} // \"z\")" ;;
+        esac
+        [[ -n "$expr" ]] && keys+=("$expr")
+    done
+
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        echo ""
+    else
+        local joined
+        printf -v joined '%s, ' "${keys[@]}"
+        echo "sort_by([${joined%, }])"
+    fi
+}
+
 _gtk_gen_report() {
     # Generate (or regenerate) one or more reports; writes to cache.
     # Usage: _gtk_gen_report name [name ...]
@@ -791,18 +852,22 @@ _gtk_gen_report() {
         local ts
         ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+        local sort_jq
+        sort_jq=$(_gtk_sort_spec_to_jq "$sort_raw")
+
         local yad_json cols_json
         yad_json=$(printf '%s\n' "${yad_cols[@]}"  | jq -R . | jq -s .)
         cols_json=$(printf '%s\n' "${cols_keys[@]}" | jq -R . | jq -s .)
 
         local entry
         entry=$(jq -n \
-            --arg  filter  "$filter_raw" \
-            --arg  sort    "$sort_raw" \
-            --arg  ts      "$ts" \
+            --arg  filter   "$filter_raw" \
+            --arg  sort     "$sort_raw" \
+            --arg  sort_jq  "$sort_jq" \
+            --arg  ts       "$ts" \
             --argjson yad_cols "$yad_json" \
             --argjson cols     "$cols_json" \
-            '{filter:$filter, sort:$sort, yad_cols:$yad_cols, cols:$cols, generated:$ts}')
+            '{filter:$filter, sort:$sort, sort_jq:$sort_jq, yad_cols:$yad_cols, cols:$cols, generated:$ts}')
 
         cache=$(echo "$cache" | jq --arg n "$name" --argjson e "$entry" '. + {($n): $e}')
         echo "[gtk] Cached: $name (${#cols_keys[@]} columns)"
@@ -817,20 +882,13 @@ _gtk_gen_report() {
 }
 
 _gtk_build_header() {
-    # Build Pango-markup header line for list displays.
-    # Usage: _gtk_build_header "display_label" filter_args...
-    local label="$1"; shift
-    local -a fargs=("$@")
-
-    local ctx total shown
-    ctx=$(task rc.hooks=off _get rc.context 2>/dev/null)
-    total=$(task rc.hooks=off rc.verbose=nothing count 2>/dev/null || true)
-    shown=$(task rc.hooks=off rc.verbose=nothing "${fargs[@]}" count 2>/dev/null || true)
-
+    # Join pre-formatted Pango segments with a bullet separator.
+    # Usage: _gtk_build_header "part1" "part2" ...
     local hdr=""
-    [[ -n "$ctx" ]] && hdr+="context: <b>$(_gtk_escape_markup "$ctx")</b>   ·   "
-    hdr+="filter: <b>$(_gtk_escape_markup "$label")</b>"
-    hdr+="   ·   <b>${shown:-?}</b>/<b>${total:-?}</b> tasks"
+    for part in "$@"; do
+        [[ -n "$hdr" ]] && hdr+="   ·   "
+        hdr+="$part"
+    done
     printf '%s' "$hdr"
 }
 
@@ -847,11 +905,13 @@ _GTK_ACT_QUIT=1
 
 _gtk_run_report() {
     # Show a cached report with action buttons in the footer.
+    # Applies context explicitly (rc.hooks=off can suppress implicit context in TW 2.6).
     # Strips columns that are entirely empty for the current result set.
+    # Applies the report's sort order via stored jq expression.
     #
     # Usage: _gtk_run_report <name> [extra-filter-args...]
     #
-    # Prints selected UUID on stdout (may be empty for global actions like undo).
+    # Prints selected UUID on stdout (empty for global actions like undo / no selection).
     # Returns exit code = action (see _GTK_ACT_* constants above).
     #   0/252 = window closed / double-click → treat as quit in caller
     #   1     = _Quit button
@@ -871,8 +931,9 @@ _gtk_run_report() {
         return 1
     }
 
-    local filter cols_json
+    local filter sort_jq cols_json
     filter=$(echo   "$entry" | jq -r '.filter // ""')
+    sort_jq=$(echo  "$entry" | jq -r '.sort_jq // ""')
     cols_json=$(echo "$entry" | jq -c '.cols')
     local -a cols_keys
     mapfile -t cols_keys < <(echo "$entry" | jq -r '.cols[]')
@@ -880,24 +941,56 @@ _gtk_run_report() {
     local -a yad_cols
     mapfile -t yad_cols < <(echo "$entry" | jq -r '.yad_cols[]')
 
+    # ── Build filter args ────────────────────────────────────────────────────
     local -a filter_args=()
     [[ -n "$filter" ]] && read -ra filter_args <<< "$filter"
     filter_args+=("${extra_filter[@]}")
     [[ ${#filter_args[@]} -eq 0 ]] && filter_args=(+PENDING)
 
-    # ── Header ────────────────────────────────────────────────────────────────
-    local filter_label="${extra_filter[*]:-}"
-    [[ -z "$filter_label" ]] && filter_label="$filter"
-    [[ -z "$filter_label" ]] && filter_label="${filter_args[*]}"
-    local header_text
-    header_text=$(_gtk_build_header "$filter_label" "${filter_args[@]}")
+    # ── Fetch and apply context explicitly ───────────────────────────────────
+    # rc.hooks=off suppresses implicit context application in TW 2.6; work around it.
+    local ctx_name ctx_read_raw=""
+    ctx_name=$(task _get rc.context 2>/dev/null)
+    [[ -n "$ctx_name" ]] && \
+        ctx_read_raw=$(task rc.hooks=off _get "rc.context.${ctx_name}.read" 2>/dev/null)
+    local -a ctx_fargs=()
+    [[ -n "$ctx_read_raw" ]] && read -ra ctx_fargs <<< "$ctx_read_raw"
 
-    # ── Buffer rows ───────────────────────────────────────────────────────────
+    # Full export filter: disable implicit context, add context filter + report filter
+    local -a full_filter=("rc.context=" "${ctx_fargs[@]}" "${filter_args[@]}")
+
+    # ── Counts for header ────────────────────────────────────────────────────
+    local total ctx_count shown
+    total=$(task rc.hooks=off rc.context= rc.verbose=nothing +PENDING count 2>/dev/null || true)
+    if [[ -n "$ctx_name" ]]; then
+        ctx_count=$(task rc.hooks=off rc.context= "${ctx_fargs[@]}" \
+                        rc.verbose=nothing count 2>/dev/null || true)
+    fi
+    shown=$(task rc.hooks=off rc.context= "${ctx_fargs[@]}" "${filter_args[@]}" \
+                rc.verbose=nothing count 2>/dev/null || true)
+
+    # ── Build header ─────────────────────────────────────────────────────────
+    local filter_label="${extra_filter[*]:-$filter}"
+    [[ -z "$filter_label" ]] && filter_label="${filter_args[*]}"
+    local -a hdr_parts=()
+    if [[ -n "$ctx_name" ]]; then
+        hdr_parts+=("<b>$(_gtk_escape_markup "$ctx_name")</b> (${ctx_count:-?}/${total:-?})")
+    fi
+    if [[ -n "$ctx_name" ]]; then
+        hdr_parts+=("<b>$(_gtk_escape_markup "$filter_label")</b> (${shown:-?}/${ctx_count:-?})")
+    else
+        hdr_parts+=("<b>$(_gtk_escape_markup "$filter_label")</b> (${shown:-?}/${total:-?})")
+    fi
+    local header_text
+    header_text=$(_gtk_build_header "${hdr_parts[@]}")
+
+    # ── Buffer rows (with sort if available) ─────────────────────────────────
+    local raw_json
+    raw_json=$(task rc.hooks=off rc.color=off "${full_filter[@]}" export 2>/dev/null)
+    [[ -n "$sort_jq" ]] && raw_json=$(echo "$raw_json" | jq "$sort_jq" 2>/dev/null || echo "$raw_json")
+
     local -a all_rows
-    mapfile -t all_rows < <(
-        task rc.hooks=off rc.color=off "${filter_args[@]}" export 2>/dev/null \
-        | jq -r --argjson cols "$cols_json" "$_GTK_REPORT_JQ"
-    )
+    mapfile -t all_rows < <(echo "$raw_json" | jq -r --argjson cols "$cols_json" "$_GTK_REPORT_JQ")
 
     local ntasks=0
     [[ ${#all_rows[@]} -gt 0 ]] && ntasks=$(( ${#all_rows[@]} / (ncols + 1) ))
@@ -926,7 +1019,7 @@ _gtk_run_report() {
             fi
         fi
     done
-    [[ $search_col -eq 0 ]] && search_col=2   # fallback: col 2 (first data col)
+    [[ $search_col -eq 0 ]] && search_col=2
 
     # ── Build filtered row data ───────────────────────────────────────────────
     local -a yad_data=()
