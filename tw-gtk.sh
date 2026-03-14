@@ -167,10 +167,34 @@ gtk_pick() {
     done
     [[ ${#filter_args[@]} -eq 0 ]] && filter_args=(+READY)
 
+    # Header: context + filter + counts
+    local ctx_name ctx_read_raw="" header_text
+    ctx_name=$(task _get rc.context 2>/dev/null)
+    [[ -n "$ctx_name" ]] && \
+        ctx_read_raw=$(task rc.hooks=off _get "rc.context.${ctx_name}.read" 2>/dev/null)
+    local -a ctx_fargs=()
+    [[ -n "$ctx_read_raw" ]] && read -ra ctx_fargs <<< "$ctx_read_raw"
+    local total ctx_count shown
+    total=$(task rc.hooks=off rc.context= rc.verbose=nothing +PENDING count 2>/dev/null || true)
+    [[ -n "$ctx_name" ]] && \
+        ctx_count=$(task rc.hooks=off rc.context= rc.verbose=nothing \
+                        "${ctx_fargs[@]}" +PENDING count 2>/dev/null || true)
+    shown=$(task rc.hooks=off rc.context= rc.verbose=nothing \
+                "${ctx_fargs[@]}" "${filter_args[@]}" count 2>/dev/null || true)
+    local -a hdr_parts=()
+    if [[ -n "$ctx_name" ]]; then
+        hdr_parts+=("<b>$(_gtk_escape_markup "$ctx_name")</b> (${ctx_count:-?}/${total:-?})")
+        hdr_parts+=("<b>$(_gtk_escape_markup "${filter_args[*]}")</b> (${shown:-?}/${ctx_count:-?})")
+    else
+        hdr_parts+=("<b>$(_gtk_escape_markup "${filter_args[*]}")</b> (${shown:-?}/${total:-?})")
+    fi
+    header_text=$(_gtk_build_header "${hdr_parts[@]}")
+
     local raw
-    raw=$(_gtk_rows "${filter_args[@]}" \
+    raw=$(_gtk_rows "${ctx_fargs[@]}" "${filter_args[@]}" \
         | yad --list \
             --title="$title" \
+            --text="$header_text" \
             --width="$width" --height="$height" \
             --enable-markup \
             --search-column=3 \
@@ -963,11 +987,11 @@ _gtk_run_report() {
     local total ctx_count shown
     total=$(task rc.hooks=off rc.context= rc.verbose=nothing +PENDING count 2>/dev/null || true)
     if [[ -n "$ctx_name" ]]; then
-        ctx_count=$(task rc.hooks=off rc.context= "${ctx_fargs[@]}" \
-                        rc.verbose=nothing count 2>/dev/null || true)
+        ctx_count=$(task rc.hooks=off rc.context= rc.verbose=nothing \
+                        "${ctx_fargs[@]}" +PENDING count 2>/dev/null || true)
     fi
-    shown=$(task rc.hooks=off rc.context= "${ctx_fargs[@]}" "${filter_args[@]}" \
-                rc.verbose=nothing count 2>/dev/null || true)
+    shown=$(task rc.hooks=off rc.context= rc.verbose=nothing \
+                "${ctx_fargs[@]}" "${filter_args[@]}" count 2>/dev/null || true)
 
     # ── Build header ─────────────────────────────────────────────────────────
     local filter_label="${extra_filter[*]:-$filter}"
@@ -1037,6 +1061,11 @@ _gtk_run_report() {
     width=$(_gtk_cfg  gtk.list-width  900)
     height=$(_gtk_cfg gtk.list-height 600)
 
+    # Use --select-action to reliably track selected UUID regardless of YAD
+    # version differences in --print-column behaviour for non-OK button presses.
+    local _uuid_file
+    _uuid_file=$(mktemp /tmp/gtk_uuid_XXXXXX)
+
     local raw
     raw=$(printf '%s\n' "${yad_data[@]}" \
         | yad --list \
@@ -1047,6 +1076,7 @@ _gtk_run_report() {
             --print-column=1 \
             --width="$width" --height="$height" \
             "${active_yad_cols[@]}" \
+            --select-action="bash -c 'printf \"%s\" \"\$1\" > \"${_uuid_file}\"' yad" \
             --button="_Done:${_GTK_ACT_DONE}" \
             --button="d_elete:${_GTK_ACT_DELETE}" \
             --button="_Start:${_GTK_ACT_START}" \
@@ -1060,8 +1090,16 @@ _gtk_run_report() {
     local ret=$?
 
     # Window-close (252) → caller treats as quit
-    [[ $ret -eq 252 ]] && return 1
+    if [[ $ret -eq 252 ]]; then
+        rm -f "$_uuid_file"
+        return 1
+    fi
 
-    printf '%s' "${raw%%|*}"
+    # Prefer --print-column result; fall back to --select-action temp file
+    local uuid="${raw%%|*}"
+    [[ -z "$uuid" && -s "$_uuid_file" ]] && uuid=$(< "$_uuid_file")
+    rm -f "$_uuid_file"
+
+    printf '%s' "$uuid"
     return $ret
 }
