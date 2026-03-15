@@ -58,8 +58,33 @@ _gtk_std_cols=(
 # ── Internal task helpers ─────────────────────────────────────────────────────
 
 _gtk_task() {
-    # Wrapper with safety rc overrides — use for mutations
+    # Hook-free mutation: fast, safe for reads/silent changes.
     task rc.hooks=off rc.confirmation=off rc.verbose=nothing "$@"
+}
+
+_gtk_task_hooked() {
+    # Hook-aware mutation: spawns a terminal so interactive hooks get a /dev/tty.
+    # Used when gtk.hooks=on in gtk.rc.
+    # Falls back to _gtk_task() if no terminal emulator is found.
+    local terminal
+    terminal=$(_gtk_cfg gtk.terminal "${TERMINAL:-xterm}")
+
+    if ! command -v "$terminal" &>/dev/null; then
+        _gtk_task "$@"
+        return
+    fi
+
+    # Write a temp script to avoid quoting issues with -e
+    local tmpscript
+    tmpscript=$(mktemp /tmp/gtk_hook_XXXXXX.sh)
+    printf '#!/bin/bash\nexec task rc.confirmation=off rc.verbose=nothing %s\n' \
+        "$(printf '%q ' "$@")" > "$tmpscript"
+    chmod +x "$tmpscript"
+
+    "$terminal" -e "$tmpscript" 2>/dev/null
+    local ret=$?
+    rm -f "$tmpscript"
+    return $ret
 }
 
 _gtk_get() {
@@ -290,7 +315,8 @@ gtk_form_add() {
 
     [[ -n "$new_desc" ]] || return 1
 
-    local -a cmd=(task rc.hooks=off add "$new_desc")
+    # rc.hooks=off intentionally omitted — on-add hooks should fire (auto-priority etc.)
+    local -a cmd=(task rc.confirmation=off add "$new_desc")
     [[ -n "$new_proj" ]]                         && cmd+=("project:${new_proj}")
     [[ -n "$new_due" ]]                          && cmd+=("due:${new_due}")
     [[ -n "$new_sched" ]]                        && cmd+=("scheduled:${new_sched}")
@@ -301,7 +327,7 @@ gtk_form_add() {
 
     "${cmd[@]}" >/dev/null 2>&1 || return 1
 
-    # Return UUID of the just-created task
+    # Return UUID of the just-created task (read-only — hooks=off correct here)
     task rc.hooks=off +LATEST _get uuid 2>/dev/null
 }
 

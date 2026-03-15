@@ -27,3 +27,24 @@ gtk.title = Taskwarrior
 
 # Urgency threshold for amber highlight (no due date, just high urgency)
 gtk.urgent-hi = 15
+
+# ── Hook-aware mutations ──────────────────────────────────────────────────────
+
+# Enable hook-aware mutations for done/start/stop/delete actions.
+# on  → spawns a terminal so interactive hooks (hledger-add, subtask, annn)
+#        get a /dev/tty; all on-modify hooks fire normally.
+# off → fast hook-free path (rc.hooks=off); safe default.
+gtk.hooks = off
+
+# Terminal emulator to use when gtk.hooks=on.
+# Must accept: terminal -e script-path
+# Examples: xterm, xfce4-terminal, kitty, alacritty
+# gtk.terminal = xterm
+
+# ── Notifications (on-modify_gtk-notify.sh) ───────────────────────────────────
+
+# Enable/disable popup notifications for done/start/stop  (on | off)
+gtk.notify = on
+
+# Popup display time in seconds
+gtk.notify-timeout = 4

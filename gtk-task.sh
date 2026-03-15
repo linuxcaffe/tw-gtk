@@ -13,6 +13,15 @@
 
 source "${HOME}/.task/scripts/tw-gtk.sh" || exit 1
 
+# ── Mutation function: hook-aware or hook-free based on gtk.hooks setting ─────
+_gtk_mutate() {
+    if [[ "$(_gtk_cfg gtk.hooks off)" == "on" ]]; then
+        _gtk_task_hooked "$@"
+    else
+        _gtk_task "$@"
+    fi
+}
+
 # ── --gen flag: generate/regenerate reports and exit ─────────────────────────
 if [[ "${1:-}" == "--gen" ]]; then
     shift
@@ -91,21 +100,21 @@ if [[ "$_gtk_report_mode" == "report" ]]; then
         case "$act" in
             "$_GTK_ACT_DONE")
                 if gtk_confirm "Mark as done?" "$uuid"; then
-                    _gtk_task "$uuid" done
+                    _gtk_mutate "$uuid" done
                     gtk_notify "✓ Completed task ${tid}"
                 fi ;;
 
             "$_GTK_ACT_DELETE")
                 if gtk_confirm "Delete this task?" "$uuid"; then
-                    _gtk_task "$uuid" delete
+                    _gtk_mutate "$uuid" delete
                     gtk_notify "Deleted task ${tid}"
                 fi ;;
 
             "$_GTK_ACT_START")
                 if [[ -n "$(_gtk_get "$uuid" start)" ]]; then
-                    _gtk_task "$uuid" stop && gtk_notify "Stopped task ${tid}"
+                    _gtk_mutate "$uuid" stop && gtk_notify "Stopped task ${tid}"
                 else
-                    _gtk_task "$uuid" start && gtk_notify "Started task ${tid}"
+                    _gtk_mutate "$uuid" start && gtk_notify "Started task ${tid}"
                 fi ;;
 
             "$_GTK_ACT_STOP")
@@ -172,7 +181,7 @@ while true; do
             fi ;;
 
         "$_GTK_ACT_STOP")
-            _gtk_task "$uuid" stop && gtk_notify "Stopped task ${tid}" ;;
+            _gtk_mutate "$uuid" stop && gtk_notify "Stopped task ${tid}" ;;
 
         "$_GTK_ACT_INFO")
             gtk_info "$uuid" ;;
