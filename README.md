@@ -238,4 +238,4 @@ Active development. The library API and config keys are stable. The report cache
 - Language: Bash
 - Requires: Taskwarrior 2.6.x, yad, jq
 - Platforms: Linux (X11/Wayland with XWayland)
-- Version: 1.2.1
+- Version: 1.2.2
