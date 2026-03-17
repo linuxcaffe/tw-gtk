@@ -53,8 +53,7 @@ You get a small set of purpose-built GTK dialogs that fit into your existing wor
 ### Option 1 — Install script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linuxcaffe/tw-gtk/main/gtk.install -o gtk.install
-bash gtk.install          # installs scripts, hook, and starter config
+curl -fsSL https://raw.githubusercontent.com/linuxcaffe/tw-gtk/main/gtk.install | bash
 ```
 
 Installs to `~/.task/scripts/` and `~/.task/hooks/`. Creates `~/.task/config/gtk.rc` if absent.
